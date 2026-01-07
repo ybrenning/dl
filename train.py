@@ -9,7 +9,9 @@ from tqdm import tqdm
 from torch.utils.data import Dataset
 
 
-if torch.backends.mps.is_available():
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+elif torch.backends.mps.is_available():
     device = torch.device("mps")
 else:
     device = torch.device("cpu")
@@ -148,7 +150,14 @@ def main():
 
         return total_loss / total, correct / total
 
-    for epoch in range(5):
+    max_epochs = 5
+    patience = 2
+    min_delta = 1e-4
+
+    best_val_loss = float("inf")
+    epochs_without_improvement = 0
+
+    for epoch in range(max_epochs):
         train_loss, train_acc = train_one_epoch(
             model, train_loader, optimizer, criterion
         )
@@ -161,6 +170,18 @@ def main():
             f"train_acc={train_acc:.3f}, "
             f"val_acc={val_acc:.3f}"
         )
+
+        if val_loss < best_val_loss - min_delta:
+            best_val_loss = val_loss
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= patience:
+                print(
+                    f"Early stopping: val_loss stopped improving "
+                    f"(best={best_val_loss:.4f})"
+                )
+                break
 
 
 if __name__ == "__main__":
