@@ -3,6 +3,7 @@ import numpy as np
 import rasterio
 from torch.utils.data import Dataset
 import torch.nn.functional as F
+from PIL import Image
 
 
 class RGB_Dataset(Dataset):

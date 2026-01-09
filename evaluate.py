@@ -50,13 +50,11 @@ def show_images_ms(entries, title):
     plt.figure(figsize=(15, 3))
     for i, item in enumerate(entries):
         path = item["path"]
-        # Read the first 3 bands for visualization (R,G,B = B4,B3,B2 for Sentinel-2)
         with rasterio.open(path) as src:
-            # Use bands 2,3,4 for RGB visualization
             img = src.read([3, 2, 1])  # shape: (3, H, W)
             img = np.transpose(img, (1, 2, 0))  # (H, W, 3)
             img = img.astype(np.float32)
-            img /= img.max()  # normalize to 0-1 for plotting
+            img /= img.max()
 
         plt.subplot(1, 5, i + 1)
         plt.imshow(img)
@@ -177,29 +175,30 @@ def reproduction_pipeline(new_logits_path, save=False, show_img=False):
             ],
         }
 
-    for c in selected_classes:
-        print(f"\n=== Class {c} ===")
+    if show_img:
+        for c in selected_classes:
+            print(f"\n=== Class {c} ===")
 
-        print("Top-5 scoring images:")
-        for item in results[c]["top_5"]:
-            print(
-                f"{item['path']} | "
-                f"score={item['score']:.3f} | "
-                f"true_label={item['true_label']}"
-            )
+            print("Top-5 scoring images:")
+            for item in results[c]["top_5"]:
+                print(
+                    f"{item['path']} | "
+                    f"score={item['score']:.3f} | "
+                    f"true_label={item['true_label']}"
+                )
 
-        print("\nBottom-5 scoring images:")
-        for item in results[c]["bottom_5"]:
-            print(
-                f"{item['path']} | "
-                f"score={item['score']:.3f} | "
-                f"true_label={item['true_label']}"
-            )
+            print("\nBottom-5 scoring images:")
+            for item in results[c]["bottom_5"]:
+                print(
+                    f"{item['path']} | "
+                    f"score={item['score']:.3f} | "
+                    f"true_label={item['true_label']}"
+                )
 
-    # TODO: Use the idx2class dict here for better clarity ?
-    for c in selected_classes:
-        show_images(results[c]["top_5"], f"Class {c} - Top 5")
-        show_images(results[c]["bottom_5"], f"Class {c} - Bottom 5")
+        # TODO: Use the idx2class dict here for better clarity ?
+        for c in selected_classes:
+            show_images(results[c]["top_5"], f"Class {c} - Top 5")
+            show_images(results[c]["bottom_5"], f"Class {c} - Bottom 5")
 
     if save:
         torch.save(
@@ -212,10 +211,10 @@ def reproduction_pipeline(new_logits_path, save=False, show_img=False):
         )
     else:
         saved = torch.load("results/test_logits_simple.pt", weights_only=False)
+
         saved_logits = saved["logits"]
         saved_labels = saved["labels"]
         saved_paths = saved["paths"]
-
         assert image_paths == saved_paths
         assert all_logits.shape == saved_logits.shape
         assert torch.equal(all_labels, saved_labels)
@@ -269,23 +268,24 @@ def run_inference_ms(save_path=None):
             save_path,
         )
 
+
     return all_logits, all_labels, image_paths
 
 
 def reproduction_pipeline_ms(new_logits_path, save=False, show_img=False):
     if new_logits_path:
         saved = torch.load(new_logits_path, weights_only=False)
-        all_logits = saved["logits"]
-        all_labels = saved["labels"]
+        all_logits = saved["logits"].to(device)
+        all_labels = saved["labels"].to(device)
         image_paths = saved["paths"]
     else:
-        all_logits, all_labels, image_paths = run_inference()
+        all_logits, all_labels, image_paths = run_inference_ms()
 
     selected_classes = [0, 3, 7]
 
     results = {}
     for c in selected_classes:
-        class_scores = all_logits[:, c].numpy()
+        class_scores = all_logits[:, c].cpu().numpy()
         sorted_idx = np.argsort(class_scores)
         bottom_5_idx = sorted_idx[:5]
         top_5_idx = sorted_idx[-5:][::-1]
@@ -347,20 +347,50 @@ def reproduction_pipeline_ms(new_logits_path, save=False, show_img=False):
     return all_logits, all_labels
 
 
+import argparse
+
 def main():
-    dataset = "ms"
+    parser = argparse.ArgumentParser(description="Run inference or reproduction pipeline.")
+    parser.add_argument(
+        "--dataset", 
+        type=str, 
+        choices=["rgb", "ms"], 
+        required=True, 
+        help="Dataset to use: 'rgb' or 'ms'."
+    )
+    parser.add_argument(
+        "--mode", 
+        type=str, 
+        choices=["inference", "reproduction", "both"], 
+        default="both",
+        help="Mode to run: 'inference', 'reproduction', or 'both'."
+    )
+    parser.add_argument(
+        "--show", 
+        action="store_true", 
+        help="Show output during the reproduction pipeline"
+    )
+
+    args = parser.parse_args()
+    dataset = args.dataset
+    mode = args.mode
+    show = args.show
+
     if dataset == "rgb":
-        new_logits_path = "results/your_logits_rgb.pt"
-        run_inference(new_logits_path)
+        logits_path = "results/your_logits_rgb.pt"
+        print(f"Note: your logits will be saved under {logits_path}")
+        if mode in ["inference", "both"]:
+            run_inference(logits_path)
+        if mode in ["reproduction", "both"]:
+            reproduction_pipeline(logits_path, show_img=show)
 
-        # This will compare 
-        reproduction_pipeline(new_logits_path)
     elif dataset == "ms":
-        new_logits_path = "results/your_logits_ms.pt"
-        run_inference_ms(new_logits_path)
-
-        # This will compare 
-        reproduction_pipeline_ms(new_logits_path, save=True, show_img=True)
+        logits_path = "results/your_logits_ms.pt"
+        print(f"Note: your logits will be saved under {logits_path}")
+        if mode in ["inference", "both"]:
+            run_inference_ms(logits_path)
+        if mode in ["reproduction", "both"]:
+            reproduction_pipeline_ms(logits_path, show_img=show)
 
 
 if __name__ == "__main__":
