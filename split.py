@@ -63,7 +63,6 @@ def create_splits(
         random_state=seed,
     )
 
-    # Step 3: split val / test
     X_val, X_test, y_val, y_test = train_test_split(
         X_tmp,
         y_tmp,
@@ -72,12 +71,10 @@ def create_splits(
         random_state=seed,
     )
 
-    # Safety checks
     assert len(set(X_train) & set(X_val)) == 0
     assert len(set(X_train) & set(X_test)) == 0
     assert len(set(X_val) & set(X_test)) == 0
 
-    # Debug info
     print("Total images:", len(image_paths))
     print("Class mapping:", class_to_idx)
     print("Train:", Counter(y_train))
@@ -99,7 +96,7 @@ def save_splits_to_txt(split, save_dir, filename):
     print(f"Saved {filename} ({len(X)} samples)")
 
 
-def main():
+def rgb_splits():
     train_split, val_split, test_split = create_splits(
         dataset_path="EuroSAT_RGB",
         train_size=2500,
@@ -115,6 +112,26 @@ def main():
     save_splits_to_txt(test_split, splits_dir, "test.txt")
 
 
+def ms_splits():
+    train_split, val_split, test_split = create_splits(
+        dataset_path="EuroSAT_MS",
+        train_size=2500,
+        val_size=1000,
+        test_size=2000,
+    )
+
+    project_root = os.path.abspath(".")
+    splits_dir = os.path.join(project_root, "splits")
+
+    save_splits_to_txt(train_split, splits_dir, "train_ms.txt")
+    save_splits_to_txt(val_split, splits_dir, "val_ms.txt")
+    save_splits_to_txt(test_split, splits_dir, "test_ms.txt")
+
+
+def main():
+    # rgb_splits()
+    ms_splits()
+
+
 if __name__ == "__main__":
     main()
-

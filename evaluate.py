@@ -1,3 +1,4 @@
+import rasterio
 import random
 import torch
 import torchvision.models as models
@@ -8,7 +9,8 @@ from torchvision import transforms
 import matplotlib.pyplot as plt
 from PIL import Image
 
-from train import EuroSATDataset
+from datasets import RGB_Dataset, MS_Dataset, MS_Resize
+from train import MyNet
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
@@ -43,6 +45,28 @@ def show_images(entries, title):
     plt.suptitle(title)
     plt.show()
 
+
+def show_images_ms(entries, title):
+    plt.figure(figsize=(15, 3))
+    for i, item in enumerate(entries):
+        path = item["path"]
+        # Read the first 3 bands for visualization (R,G,B = B4,B3,B2 for Sentinel-2)
+        with rasterio.open(path) as src:
+            # Use bands 2,3,4 for RGB visualization
+            img = src.read([3, 2, 1])  # shape: (3, H, W)
+            img = np.transpose(img, (1, 2, 0))  # (H, W, 3)
+            img = img.astype(np.float32)
+            img /= img.max()  # normalize to 0-1 for plotting
+
+        plt.subplot(1, 5, i + 1)
+        plt.imshow(img)
+        plt.axis("off")
+        plt.title(f"{item['score']:.2f}")
+
+    plt.suptitle(title)
+    plt.show()
+
+
 def run_inference(save_path=None):
     num_classes = 10
     model = models.resnet18(weights=None)
@@ -58,7 +82,7 @@ def run_inference(save_path=None):
         transforms.ToTensor()
     ])
 
-    test_dataset = EuroSATDataset(
+    test_dataset = RGB_Dataset(
         split_file="splits/test.txt",
         transform=test_transform
     )
@@ -94,7 +118,8 @@ def run_inference(save_path=None):
             },
             save_path,
         )
-    return all_logits, all_labels
+
+    return all_logits, all_labels, image_paths
 
 
 def reproduction_pipeline(new_logits_path, save=False, show_img=False):
@@ -200,13 +225,142 @@ def reproduction_pipeline(new_logits_path, save=False, show_img=False):
             f"Max absolute difference between computed and saved logits: {diff:.6f}"
         )
 
+def run_inference_ms(save_path=None):
+    model_path = "eurosat_ms6_latefusion.pth"
+    num_classes = 10
+
+    model = MyNet(num_classes=num_classes).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+
+    test_transform = MS_Resize((224, 224))
+
+    MS_BANDS_6 = [1, 2, 3, 7, 10, 11]
+    test_dataset = MS_Dataset(
+        split_file="splits/test_ms.txt",
+        band_indices=MS_BANDS_6,
+        transform=test_transform
+    )
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+    all_logits = []
+    all_labels = []
+
+    with torch.no_grad():
+        for images, labels in test_loader:
+            images = images.to(device)
+            labels = labels.to(device)
+            logits = model(images)
+
+            all_logits.append(logits.cpu())
+            all_labels.append(labels.cpu())
+
+    all_logits = torch.cat(all_logits, dim=0)
+    all_labels = torch.cat(all_labels, dim=0)
+    image_paths = [p for p, _ in test_dataset.samples]
+
+    if save_path:
+        torch.save(
+            {
+                "logits" :all_logits,
+                "labels": all_labels,
+                "paths": image_paths,
+            },
+            save_path,
+        )
+
+    return all_logits, all_labels, image_paths
+
+
+def reproduction_pipeline_ms(new_logits_path, save=False, show_img=False):
+    if new_logits_path:
+        saved = torch.load(new_logits_path, weights_only=False)
+        all_logits = saved["logits"]
+        all_labels = saved["labels"]
+        image_paths = saved["paths"]
+    else:
+        all_logits, all_labels, image_paths = run_inference()
+
+    selected_classes = [0, 3, 7]
+
+    results = {}
+    for c in selected_classes:
+        class_scores = all_logits[:, c].numpy()
+        sorted_idx = np.argsort(class_scores)
+        bottom_5_idx = sorted_idx[:5]
+        top_5_idx = sorted_idx[-5:][::-1]
+
+        results[c] = {
+            "top_5": [
+                {
+                    "path": image_paths[i],
+                    "score": class_scores[i],
+                    "true_label": all_labels[i].item(),
+                }
+                for i in top_5_idx
+            ],
+            "bottom_5": [
+                {
+                    "path": image_paths[i],
+                    "score": class_scores[i],
+                    "true_label": all_labels[i].item(),
+                }
+                for i in bottom_5_idx
+            ],
+        }
+
+    if show_img:
+        for c in selected_classes:
+            print(f"\n=== Class {c} ===")
+            print("Top-5 scoring images:")
+            for item in results[c]["top_5"]:
+                print(f"{item['path']} | score={item['score']:.3f} | true_label={item['true_label']}")
+            print("\nBottom-5 scoring images:")
+            for item in results[c]["bottom_5"]:
+                print(f"{item['path']} | score={item['score']:.3f} | true_label={item['true_label']}")
+
+            show_images_ms(results[c]["top_5"], f"Class {c} - Top 5")
+            show_images_ms(results[c]["bottom_5"], f"Class {c} - Bottom 5")
+
+    if save:
+        torch.save(
+            {
+                "logits": all_logits,
+                "labels": all_labels,
+                "paths": image_paths,
+            },
+            "results/test_logits_ms.pt",
+        )
+    else:
+        saved = torch.load("results/test_logits_ms.pt", map_location=device)
+        saved_logits = saved["logits"]
+        saved_labels = saved["labels"]
+        saved_paths = saved["paths"]
+
+        assert image_paths == saved_paths
+        assert all_logits.shape == saved_logits.shape
+        assert torch.equal(all_labels, saved_labels)
+
+        diff = torch.max(torch.abs(all_logits - saved_logits))
+        print(f"Max absolute difference between computed and saved logits: {diff:.6f}")
+
+    return all_logits, all_labels
+
 
 def main():
-    new_logits_path = "results/your_logits.pt"
-    run_inference(new_logits_path)
+    dataset = "ms"
+    if dataset == "rgb":
+        new_logits_path = "results/your_logits_rgb.pt"
+        run_inference(new_logits_path)
 
-    # This will compare 
-    reproduction_pipeline(new_logits_path)
+        # This will compare 
+        reproduction_pipeline(new_logits_path)
+    elif dataset == "ms":
+        new_logits_path = "results/your_logits_ms.pt"
+        run_inference_ms(new_logits_path)
+
+        # This will compare 
+        reproduction_pipeline_ms(new_logits_path, save=True, show_img=True)
 
 
 if __name__ == "__main__":

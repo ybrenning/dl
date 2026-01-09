@@ -3,13 +3,16 @@ import random
 import torch
 import torch.nn as nn
 import torchvision.models as models
+
 import os
 from torchvision import transforms
 from torch.utils.data import DataLoader
 from PIL import Image
 from tqdm import tqdm
-from torch.utils.data import Dataset
 
+from datasets import RGB_Dataset, MS_Dataset, MS_Resize
+
+from skimage.io import imread
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
@@ -35,27 +38,6 @@ torch.backends.cudnn.benchmark = False
 
 num_classes = 10
 
-class EuroSATDataset(Dataset):
-    def __init__(self, split_file, transform=None):
-        self.transform = transform
-
-        self.samples = []
-        with open(split_file, "r") as f:
-            for line in f:
-                rel_path, label = line.strip().split()
-                self.samples.append((rel_path, int(label)))
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        img_path, label = self.samples[idx]
-        image = Image.open(img_path).convert("RGB")
-
-        if self.transform is not None:
-            image = self.transform(image)
-
-        return image, label
 
 
 @torch.no_grad()
@@ -144,12 +126,12 @@ def train_and_evaluate(
         transforms.ToTensor()
     ])
 
-    train_dataset = EuroSATDataset(
+    train_dataset = RGB_Dataset(
         split_file="splits/train.txt",
         transform=train_transform
     )
 
-    val_dataset = EuroSATDataset(
+    val_dataset = RGB_Dataset(
         split_file="splits/val.txt",
         transform=val_transform
     )
@@ -219,7 +201,7 @@ def train_and_evaluate(
     return accs
 
 
-def main():
+def train_rgb():
     train_transform_simple = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.RandomHorizontalFlip(p=0.5),
@@ -244,6 +226,106 @@ def main():
         train_transform_strong,
         transform_name="strong"
     )
+
+
+class ResNet18_FeatureExtractor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        base = models.resnet18(weights="IMAGENET1K_V1")
+        self.features = nn.Sequential(*list(base.children())[:-2])
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = x.flatten(1)  # shape: (B, 512)
+        return x
+
+class MyNet(nn.Module):
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.net = ResNet18_FeatureExtractor()
+        self.fc = nn.Linear(512 * 2, num_classes)
+
+    def forward(self, x):
+        x1 = x[:, :3]
+        x2 = x[:, 3:]
+
+        f1 = self.net(x1)  # (B, 512)
+        f2 = self.net(x2)  # (B, 512)
+
+        fused = torch.cat([f1, f2], dim=1)  # (B, 1024)
+
+        out = self.fc(fused)  # (B, num_classes)
+        return out
+
+
+def train_ms(
+    train_split="splits/train_ms.txt",
+    val_split="splits/val_ms.txt",
+    num_classes=10,
+    batch_size=32,
+    max_epochs=10,
+    patience=2,
+    lr=1e-4
+):
+    MS_BANDS_6 = [1, 2, 3, 7, 10, 11]
+
+    train_transform = MS_Resize((224, 224))
+    val_transform = MS_Resize((224, 224))
+
+    train_dataset = MS_Dataset(
+        split_file=train_split,
+        band_indices=MS_BANDS_6,
+        transform=train_transform,
+    )
+    val_dataset = MS_Dataset(
+        split_file=val_split,
+        band_indices=MS_BANDS_6,
+        transform=val_transform,
+    )
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    model = MyNet(num_classes=num_classes).to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    best_val_loss = float("inf")
+    epochs_no_improve = 0
+
+    all_per_class_acc = []
+
+    for epoch in range(max_epochs):
+        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion)
+        val_loss, val_acc = evaluate(model, val_loader, criterion)
+
+        per_class_acc = per_class_accuracy(model, val_loader, num_classes)
+        all_per_class_acc.append(per_class_acc)
+
+        print(f"Epoch {epoch+1}: train_acc={train_acc:.3f}, val_acc={val_acc:.3f}")
+
+        if val_loss < best_val_loss - 1e-4:
+            best_val_loss = val_loss
+            epochs_no_improve = 0
+            torch.save(model.state_dict(), "eurosat_ms6_latefusion.pth")
+            print("Saved new best model!")
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                print("Early stopping")
+                break
+
+    all_per_class_acc = np.array(all_per_class_acc)
+    os.makedirs("results", exist_ok=True)
+    np.save("results/per_class_acc_ms6.npy", all_per_class_acc)
+    print("Saved per-class accuracies to results/per_class_acc_ms6.npy")
+
+
+def main():
+    # train_rgb()
+    train_ms()
 
 
 if __name__ == "__main__":
