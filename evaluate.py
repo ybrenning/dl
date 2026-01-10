@@ -1,4 +1,4 @@
-import rasterio
+from skimage.io import imread
 import random
 import torch
 import torchvision.models as models
@@ -46,15 +46,21 @@ def show_images(entries, title):
     plt.show()
 
 
+
 def show_images_ms(entries, title):
     plt.figure(figsize=(15, 3))
+
     for i, item in enumerate(entries):
         path = item["path"]
-        with rasterio.open(path) as src:
-            img = src.read([3, 2, 1])  # shape: (3, H, W)
-            img = np.transpose(img, (1, 2, 0))  # (H, W, 3)
-            img = img.astype(np.float32)
-            img /= img.max()
+
+        # Load image: (H, W, C)
+        img = imread(path)
+
+        # Select RGB-like bands (3, 2, 1) -> zero-based indices (2, 1, 0)
+        img = img[:, :, [2, 1, 0]]
+
+        img = img.astype(np.float32)
+        img /= img.max()
 
         plt.subplot(1, 5, i + 1)
         plt.imshow(img)

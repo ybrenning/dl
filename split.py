@@ -4,6 +4,7 @@ from sklearn.model_selection import train_test_split
 from collections import Counter
 
 
+
 def load_eurosat_paths(dataset_path):
     class_names = sorted(
         d for d in os.listdir(dataset_path)
